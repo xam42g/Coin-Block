@@ -1,0 +1,903 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no" />
+<title>Ball Block Maze - Core Rebuild</title>
+<style>
+html,body{
+  margin:0;
+  width:100%;
+  height:100%;
+  overflow:hidden;
+  background:#3b3048;
+  touch-action:none;
+  user-select:none;
+  -webkit-user-select:none;
+}
+canvas{
+  display:block;
+  width:100vw;
+  height:100vh;
+  image-rendering:pixelated;
+  background:#3b3048;
+}
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<script>
+(() => {
+"use strict";
+
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d", { alpha:false });
+ctx.imageSmoothingEnabled = false;
+
+let DPR = 1;
+let W = 0;
+let H = 0;
+let S = 1;
+
+const grid = {
+  cols: 9,
+  rows: 9,
+  x: 0,
+  y: 0,
+  cell: 72,
+  size: 648,
+  spawnRow: 4
+};
+
+const ui = {
+  x: 0,
+  y: 0,
+  bw: 250,
+  bh: 110,
+  gap: 16
+};
+
+const state = {
+  coins: 0,
+  blocks: [],
+  balls: [],
+  texts: [],
+  coinsFx: [],
+  sparks: [],
+  zones: [],
+  time: 0,
+
+  placing: null,
+  dragging: null,
+  dragMoved: false,
+  dragOffsetX: 0,
+  dragOffsetY: 0,
+  dragStartX: 0,
+  dragStartY: 0,
+  tool: "move",
+
+  blockBuys: 0,
+  blockCost: 0,
+
+  ballCost: 500,
+  income: 1.4,
+  incomeCost: 60,
+  speed: 1.05,
+  speedCost: 300,
+  crit: 0,
+  critCost: 250,
+  triple: 0,
+  tripleCost: 350,
+
+  nextId: 1,
+  bonusPopup: false,
+  bonusUntil: 0,
+  settings: false,
+  showTextCoins: true
+};
+
+function resize(){
+  DPR = Math.min(2, window.devicePixelRatio || 1);
+  canvas.width = Math.floor(innerWidth * DPR);
+  canvas.height = Math.floor(innerHeight * DPR);
+  W = canvas.width;
+  H = canvas.height;
+  S = Math.min(W/1536, H/1024);
+
+  grid.size = Math.min(690*S, H - 215*S, W * 0.56);
+  grid.cell = Math.floor(grid.size / grid.cols);
+  grid.size = grid.cell * grid.cols;
+  grid.x = Math.max(150*S, (W - grid.size - 530*S) / 2);
+  grid.y = Math.max(175*S, (H - grid.size) / 2 + 28*S);
+
+  ui.x = grid.x + grid.size + 86*S;
+  ui.y = grid.y + 94*S;
+  ui.bw = 250*S;
+  ui.bh = 110*S;
+  ui.gap = 16*S;
+
+  if(state.balls.length === 0) addBall();
+  for(const b of state.balls) {
+    if(b.needsLayout) respawnBall(b, false);
+  }
+}
+window.addEventListener("resize", resize);
+
+function fmt(n){
+  if(n >= 1e9) return (n/1e9).toFixed(1) + "B";
+  if(n >= 1e6) return (n/1e6).toFixed(1) + "M";
+  if(n >= 1e3) return (n/1e3).toFixed(n>=10000?0:1) + "K";
+  return (Math.round(n*10)/10).toString();
+}
+
+function center(c,r){
+  return {
+    x: grid.x + (c + 0.5) * grid.cell,
+    y: grid.y + (r + 0.5) * grid.cell
+  };
+}
+
+function spawnPoint(){
+  const p = center(0, grid.spawnRow);
+  return { x: grid.x - 16*S, y: p.y };
+}
+
+function rect(x,y,w,h,fill,stroke="#080808",lw=5*S){
+  ctx.fillStyle = fill;
+  ctx.fillRect(x,y,w,h);
+  ctx.lineWidth = lw;
+  ctx.strokeStyle = stroke;
+  ctx.strokeRect(x,y,w,h);
+}
+
+function text(str,x,y,size,color="#fff",align="center"){
+  ctx.save();
+  ctx.font = `900 ${size*S}px monospace`;
+  ctx.textAlign = align;
+  ctx.textBaseline = "middle";
+  ctx.lineWidth = Math.max(3*S, size*S*0.12);
+  ctx.strokeStyle = "#242129";
+  ctx.strokeText(str,x,y);
+  ctx.fillStyle = color;
+  ctx.fillText(str,x,y);
+  ctx.restore();
+}
+
+function coin(x,y,r=15*S){
+  ctx.fillStyle = "#ffc21b";
+  ctx.beginPath();
+  ctx.arc(x,y,r,0,Math.PI*2);
+  ctx.fill();
+  ctx.lineWidth = 4*S;
+  ctx.strokeStyle = "#4b3100";
+  ctx.stroke();
+  ctx.fillStyle = "#e59d00";
+  ctx.beginPath();
+  ctx.arc(x,y,r*0.47,0,Math.PI*2);
+  ctx.fill();
+}
+
+function addText(t,x,y,color="#ffc21b",size=23){
+  if(!state.showTextCoins && t.startsWith("+")) return;
+  state.texts.push({t,x,y,color,size,life:1,vy:-46*S});
+}
+
+function addSparks(x,y,color="#ffc21b",n=7){
+  for(let i=0;i<n;i++){
+    const a = Math.random()*Math.PI*2;
+    const sp = 45*S + Math.random()*140*S;
+    state.sparks.push({
+      x,y,
+      vx:Math.cos(a)*sp,
+      vy:Math.sin(a)*sp,
+      color,
+      life:.28+Math.random()*.22
+    });
+  }
+}
+
+function addCoinFx(x,y,n=5){
+  for(let i=0;i<n;i++){
+    const a = Math.random()*Math.PI*2;
+    const sp = 45*S + Math.random()*125*S;
+    state.coinsFx.push({
+      x,y,
+      vx:Math.cos(a)*sp,
+      vy:Math.sin(a)*sp-75*S,
+      life:.78+Math.random()*.2
+    });
+  }
+}
+
+function pointer(e){
+  const r = canvas.getBoundingClientRect();
+  return { x:(e.clientX-r.left)*DPR, y:(e.clientY-r.top)*DPR };
+}
+
+function cellAt(x,y){
+  const c = Math.floor((x-grid.x)/grid.cell);
+  const r = Math.floor((y-grid.y)/grid.cell);
+  if(c<0 || r<0 || c>=grid.cols || r>=grid.rows) return null;
+  return {c,r};
+}
+
+function blockAt(c,r,ignore=null){
+  return state.blocks.find(b => b !== ignore && b.c === c && b.r === r) || null;
+}
+
+function blockRect(b){
+  if(state.dragging === b && b.dragX !== undefined){
+    return { x:b.dragX+2*S, y:b.dragY+2*S, w:grid.cell-4*S, h:grid.cell-4*S };
+  }
+  return {
+    x:grid.x+b.c*grid.cell+2*S,
+    y:grid.y+b.r*grid.cell+2*S,
+    w:grid.cell-4*S,
+    h:grid.cell-4*S
+  };
+}
+
+function addBall(){
+  const ball = {
+    x:0,y:0,
+    dir:"right",
+    r:9*S,
+    speed:230*S,
+    born:0,
+    hitCooldown:0,
+    skin:Math.floor(Math.random()*4),
+    needsLayout:true
+  };
+  state.balls.push(ball);
+  respawnBall(ball, false);
+}
+
+function respawnBall(ball, effects=true){
+  const p = spawnPoint();
+  ball.x = p.x;
+  ball.y = p.y;
+  ball.dir = "right";
+  ball.r = 9*S;
+  ball.speed = 230*S;
+  ball.born = performance.now();
+  ball.hitCooldown = 0;
+  ball.skin = Math.floor(Math.random()*4);
+  ball.needsLayout = false;
+  if(effects) addSparks(ball.x, ball.y, "#83d86b", 8);
+}
+
+function directionVector(dir){
+  if(dir === "right") return {dx:1,dy:0};
+  if(dir === "left") return {dx:-1,dy:0};
+  if(dir === "down") return {dx:0,dy:1};
+  return {dx:0,dy:-1};
+}
+
+function opposite(dir){
+  if(dir === "right") return "left";
+  if(dir === "left") return "right";
+  if(dir === "down") return "up";
+  return "down";
+}
+
+function reflectTriangle(tri, incomingDir){
+  // Das rote Standard-Dreieck im Screenshot lenkt:
+  // Ball kommt von rechts nach links => nach unten.
+  // Tippen rotiert das Dreieck, damit alle Varianten spielbar sind.
+  const table = [
+    { left:"down", up:"right", right:"up", down:"left" },
+    { left:"up", down:"right", right:"down", up:"left" },
+    { left:"up", down:"right", right:"down", up:"left" },
+    { left:"down", up:"right", right:"up", down:"left" }
+  ];
+  return table[tri.rot % 4][incomingDir] || opposite(incomingDir);
+}
+
+function buyBlock(){
+  if(state.coins + 0.0001 < state.blockCost){
+    addText("NO COINS", ui.x+120*S, ui.y-24*S, "#ff3838", 22);
+    return;
+  }
+
+  state.coins -= state.blockCost;
+  state.blockBuys += 1;
+  state.blockCost = state.blockBuys === 1 ? 5 : Math.round(5 * Math.pow(1.55, state.blockBuys-1));
+
+  let type = "normal";
+  if(state.blockBuys === 1 || state.blockBuys === 4 || state.blockBuys === 7) type = "tri";
+  if(state.blockBuys === 10) type = "type8";
+  if(state.blockBuys === 12) type = "type9";
+
+  let level = 2;
+  if(type === "tri") level = 1;
+  if(type === "type8") level = 8;
+  if(type === "type9") level = 9;
+
+  state.placing = { type, level, rot:0 };
+  state.tool = "place";
+  addText("FELD ANTIPPEN", grid.x+grid.size/2, grid.y-44*S, "#39ff4c", 22);
+}
+
+function placeBlock(c,r){
+  if(!state.placing) return;
+  if(blockAt(c,r)){
+    const p = center(c,r);
+    addText("FULL", p.x, p.y, "#ff3838", 20);
+    return;
+  }
+  state.blocks.push({
+    id:state.nextId++,
+    c,r,
+    type:state.placing.type,
+    level:state.placing.level,
+    rot:state.placing.rot
+  });
+  const p = center(c,r);
+  addSparks(p.x,p.y,"#fff",10);
+  state.placing = null;
+  state.tool = "move";
+}
+
+function buyBall(){
+  if(state.coins < state.ballCost){
+    addText("NO COINS", ui.x+370*S, ui.y-24*S, "#ff3838", 22);
+    return;
+  }
+  state.coins -= state.ballCost;
+  state.ballCost = Math.round(state.ballCost * 2.55);
+  addBall();
+  addText("+BALL", ui.x+375*S, ui.y-25*S, "#fff", 23);
+}
+
+function upgrade(kind){
+  if(kind === "income"){
+    if(state.coins < state.incomeCost) return addText("NO COINS", ui.x+120*S, ui.y+ui.bh+ui.gap-20*S, "#ff3838", 19);
+    state.coins -= state.incomeCost;
+    state.income = Math.round((state.income+0.1)*10)/10;
+    state.incomeCost = Math.round(state.incomeCost*1.88);
+  }
+  if(kind === "speed"){
+    if(state.coins < state.speedCost) return addText("NO COINS", ui.x+375*S, ui.y+ui.bh+ui.gap-20*S, "#ff3838", 19);
+    state.coins -= state.speedCost;
+    state.speed = Math.round((state.speed+0.02)*100)/100;
+    state.speedCost = Math.round(state.speedCost*1.82);
+  }
+  if(kind === "crit"){
+    if(state.coins < state.critCost) return addText("NO COINS", ui.x+120*S, ui.y+2*(ui.bh+ui.gap)-20*S, "#ff3838", 19);
+    state.coins -= state.critCost;
+    state.crit = Math.round((state.crit+2.4)*10)/10;
+    state.critCost = Math.round(state.critCost*1.86);
+  }
+  if(kind === "triple"){
+    if(state.coins < state.tripleCost) return addText("NO COINS", ui.x+375*S, ui.y+2*(ui.bh+ui.gap)-20*S, "#ff3838", 19);
+    state.coins -= state.tripleCost;
+    state.triple = Math.round((state.triple+0.8)*10)/10;
+    state.tripleCost = Math.round(state.tripleCost*1.9);
+  }
+}
+
+function earn(value,x,y){
+  let mult = state.income;
+  const crit = Math.random()*100 < state.crit;
+  const triple = Math.random()*100 < state.triple;
+  if(crit) mult *= 2;
+  if(triple) mult *= 3;
+  if(performance.now() < state.bonusUntil) mult *= 2;
+
+  const amount = value * mult;
+  state.coins += amount;
+  addText("+"+fmt(amount), x, y, crit||triple ? "#ff4fc3" : "#ffc21b", crit||triple ? 29 : 23);
+  addCoinFx(x,y,crit||triple?9:5);
+}
+
+function inside(p,z){
+  return p.x>=z.x && p.x<=z.x+z.w && p.y>=z.y && p.y<=z.y+z.h;
+}
+
+canvas.addEventListener("pointerdown", e => {
+  const p = pointer(e);
+
+  if(state.bonusPopup){
+    const yes = {x:W/2-190*S,y:H/2+130*S,w:180*S,h:84*S};
+    const no = {x:W/2+20*S,y:H/2+130*S,w:180*S,h:84*S};
+    if(inside(p,yes)){
+      const reward = Math.max(60, Math.round((state.coins+30)*4));
+      state.coins += reward;
+      addText("BONUS +"+fmt(reward), W/2, H/2-150*S, "#ffc21b", 32);
+      state.bonusPopup = false;
+    } else if(inside(p,no)) {
+      state.bonusPopup = false;
+    }
+    return;
+  }
+
+  if(state.settings){
+    const close = {x:W/2-60*S,y:H/2+135*S,w:120*S,h:84*S};
+    const toggle = {x:W/2-165*S,y:H/2+40*S,w:70*S,h:70*S};
+    if(inside(p,close)) state.settings = false;
+    else if(inside(p,toggle)) state.showTextCoins = !state.showTextCoins;
+    return;
+  }
+
+  for(const z of state.zones){
+    if(inside(p,z)){ z.fn(); return; }
+  }
+
+  const cell = cellAt(p.x,p.y);
+  if(!cell) return;
+
+  if(state.tool === "trash"){
+    const b = blockAt(cell.c,cell.r);
+    if(b){
+      state.blocks.splice(state.blocks.indexOf(b),1);
+      addText("DEL", p.x,p.y, "#fff", 20);
+    }
+    return;
+  }
+
+  if(state.placing){
+    placeBlock(cell.c,cell.r);
+    return;
+  }
+
+  const b = blockAt(cell.c,cell.r);
+  if(b){
+    state.dragging = b;
+    state.dragMoved = false;
+    b.dragX = grid.x + b.c*grid.cell;
+    b.dragY = grid.y + b.r*grid.cell;
+    state.dragOffsetX = p.x - b.dragX;
+    state.dragOffsetY = p.y - b.dragY;
+    state.dragStartX = p.x;
+    state.dragStartY = p.y;
+  }
+});
+
+canvas.addEventListener("pointermove", e => {
+  if(!state.dragging) return;
+  const p = pointer(e);
+  if(Math.hypot(p.x-state.dragStartX,p.y-state.dragStartY) > 8*S) state.dragMoved = true;
+  state.dragging.dragX = p.x - state.dragOffsetX;
+  state.dragging.dragY = p.y - state.dragOffsetY;
+});
+
+canvas.addEventListener("pointerup", e => {
+  if(!state.dragging) return;
+  const p = pointer(e);
+  const b = state.dragging;
+  const cell = cellAt(p.x,p.y);
+
+  if(!state.dragMoved && b.type === "tri"){
+    b.rot = (b.rot+1)%4;
+    const cp = center(b.c,b.r);
+    addSparks(cp.x,cp.y,"#fff",5);
+  } else if(cell && !blockAt(cell.c,cell.r,b)){
+    b.c = cell.c;
+    b.r = cell.r;
+  }
+
+  delete b.dragX;
+  delete b.dragY;
+  state.dragging = null;
+});
+
+function nextCellForBall(ball){
+  const v = directionVector(ball.dir);
+  let c, r;
+
+  if(ball.dir === "right"){
+    c = Math.floor((ball.x - grid.x) / grid.cell) + 1;
+    r = Math.round((ball.y - grid.y) / grid.cell - 0.5);
+  } else if(ball.dir === "left"){
+    c = Math.ceil((ball.x - grid.x) / grid.cell) - 1;
+    r = Math.round((ball.y - grid.y) / grid.cell - 0.5);
+  } else if(ball.dir === "down"){
+    c = Math.round((ball.x - grid.x) / grid.cell - 0.5);
+    r = Math.floor((ball.y - grid.y) / grid.cell) + 1;
+  } else {
+    c = Math.round((ball.x - grid.x) / grid.cell - 0.5);
+    r = Math.ceil((ball.y - grid.y) / grid.cell) - 1;
+  }
+
+  return {c,r,dx:v.dx,dy:v.dy};
+}
+
+function impactPointForBlock(ball,b){
+  let x = ball.x;
+  let y = ball.y;
+
+  if(ball.dir === "right"){
+    x = grid.x + b.c*grid.cell - ball.r;
+    y = center(b.c,b.r).y;
+  } else if(ball.dir === "left"){
+    x = grid.x + (b.c+1)*grid.cell + ball.r;
+    y = center(b.c,b.r).y;
+  } else if(ball.dir === "down"){
+    x = center(b.c,b.r).x;
+    y = grid.y + b.r*grid.cell - ball.r;
+  } else {
+    x = center(b.c,b.r).x;
+    y = grid.y + (b.r+1)*grid.cell + ball.r;
+  }
+
+  return {x,y};
+}
+
+function crossedImpact(ball,impact){
+  if(ball.dir === "right") return ball.x >= impact.x;
+  if(ball.dir === "left") return ball.x <= impact.x;
+  if(ball.dir === "down") return ball.y >= impact.y;
+  return ball.y <= impact.y;
+}
+
+function pushOutAfterHit(ball){
+  const v = directionVector(ball.dir);
+  ball.x += v.dx * 5*S;
+  ball.y += v.dy * 5*S;
+
+  // Ball soll auf Zell-Mittellinien bleiben.
+  if(ball.dir === "left" || ball.dir === "right"){
+    const row = Math.round((ball.y-grid.y)/grid.cell - 0.5);
+    if(row >= 0 && row < grid.rows) ball.y = center(0,row).y;
+  } else {
+    const col = Math.round((ball.x-grid.x)/grid.cell - 0.5);
+    if(col >= 0 && col < grid.cols) ball.x = center(col,0).x;
+  }
+}
+
+function updateBall(ball,dt){
+  if(performance.now() - ball.born > 7000){
+    respawnBall(ball);
+    return;
+  }
+
+  const vec = directionVector(ball.dir);
+  const step = ball.speed * state.speed * dt;
+  ball.x += vec.dx * step;
+  ball.y += vec.dy * step;
+
+  // Wände: Spiegelung an der Spielfeldkante, danach weiter auf gerader Linie.
+  if(ball.x < grid.x + ball.r){
+    ball.x = grid.x + ball.r;
+    ball.dir = "right";
+  }
+  if(ball.x > grid.x + grid.size - ball.r){
+    ball.x = grid.x + grid.size - ball.r;
+    ball.dir = "left";
+  }
+  if(ball.y < grid.y + ball.r){
+    ball.y = grid.y + ball.r;
+    ball.dir = "down";
+  }
+  if(ball.y > grid.y + grid.size - ball.r){
+    ball.y = grid.y + grid.size - ball.r;
+    ball.dir = "up";
+  }
+
+  const next = nextCellForBall(ball);
+  if(next.c<0 || next.r<0 || next.c>=grid.cols || next.r>=grid.rows) return;
+
+  const b = blockAt(next.c,next.r);
+  if(!b) return;
+
+  const impact = impactPointForBlock(ball,b);
+  if(!crossedImpact(ball,impact)) return;
+  if(performance.now() < ball.hitCooldown) return;
+
+  ball.x = impact.x;
+  ball.y = impact.y;
+  ball.hitCooldown = performance.now() + 120;
+
+  earn(b.type === "tri" ? 1 : b.level, ball.x, ball.y);
+  addSparks(ball.x, ball.y, b.type==="type9" ? "#b04cff" : "#ffc21b", 5);
+
+  if(b.type === "tri"){
+    ball.dir = reflectTriangle(b,ball.dir);
+  } else {
+    ball.dir = opposite(ball.dir);
+  }
+
+  pushOutAfterHit(ball);
+}
+
+function update(dt){
+  state.time += dt;
+
+  for(const b of state.balls) updateBall(b,dt);
+
+  for(let i=state.texts.length-1;i>=0;i--){
+    const t=state.texts[i];
+    t.life-=dt;
+    t.y+=t.vy*dt;
+    if(t.life<=0) state.texts.splice(i,1);
+  }
+  for(let i=state.coinsFx.length-1;i>=0;i--){
+    const c=state.coinsFx[i];
+    c.life-=dt;
+    c.vy+=240*S*dt;
+    c.x+=c.vx*dt;
+    c.y+=c.vy*dt;
+    if(c.life<=0) state.coinsFx.splice(i,1);
+  }
+  for(let i=state.sparks.length-1;i>=0;i--){
+    const s=state.sparks[i];
+    s.life-=dt;
+    s.x+=s.vx*dt;
+    s.y+=s.vy*dt;
+    if(s.life<=0) state.sparks.splice(i,1);
+  }
+}
+
+function drawBoard(){
+  const pipe = 25*S;
+
+  rect(grid.x-pipe,grid.y-pipe,grid.size+pipe*2,grid.size+pipe*2,"#9fbfc8","#2a2632",6*S);
+
+  ctx.fillStyle = "rgba(255,255,255,.16)";
+  ctx.fillRect(grid.x-pipe+8*S, grid.y-pipe+7*S, grid.size+pipe*2-16*S, 8*S);
+  ctx.fillRect(grid.x-pipe+8*S, grid.y+grid.size+pipe-15*S, grid.size+pipe*2-16*S, 8*S);
+
+  ctx.fillStyle = "#bddada";
+  ctx.fillRect(grid.x,grid.y,grid.size,grid.size);
+
+  ctx.strokeStyle = "#362e43";
+  ctx.lineWidth = 4*S;
+  for(let i=0;i<=grid.cols;i++){
+    ctx.beginPath();
+    ctx.moveTo(grid.x+i*grid.cell,grid.y);
+    ctx.lineTo(grid.x+i*grid.cell,grid.y+grid.size);
+    ctx.stroke();
+  }
+  for(let r=0;r<=grid.rows;r++){
+    ctx.beginPath();
+    ctx.moveTo(grid.x,grid.y+r*grid.cell);
+    ctx.lineTo(grid.x+grid.size,grid.y+r*grid.cell);
+    ctx.stroke();
+  }
+
+  ctx.fillStyle = "#756e7e";
+  ctx.fillRect(grid.x+grid.size/2-18*S,grid.y-pipe-72*S,36*S,72*S);
+
+  // grüner Spawnpunkt links
+  ctx.fillStyle = "#6bae5d";
+  ctx.beginPath();
+  ctx.ellipse(grid.x-pipe-4*S, center(0,grid.spawnRow).y, 7*S, 20*S, 0, 0, Math.PI*2);
+  ctx.fill();
+}
+
+function drawTriangle(b,r){
+  ctx.save();
+  ctx.translate(r.x+r.w/2,r.y+r.h/2);
+  ctx.rotate(b.rot*Math.PI/2);
+  ctx.translate(-r.w/2,-r.h/2);
+
+  ctx.fillStyle = "#d83f55";
+  ctx.beginPath();
+  ctx.moveTo(0,0);
+  ctx.lineTo(r.w,0);
+  ctx.lineTo(r.w,r.h);
+  ctx.closePath();
+  ctx.fill();
+  ctx.lineWidth = 3*S;
+  ctx.strokeStyle = "#18141d";
+  ctx.stroke();
+
+  ctx.strokeStyle = "#fff";
+  ctx.lineWidth = 5*S;
+  ctx.beginPath();
+  ctx.moveTo(r.w*.66,r.h*.36);
+  ctx.lineTo(r.w*.78,r.h*.24);
+  ctx.stroke();
+
+  ctx.restore();
+}
+
+function drawNormalBlock(b,r){
+  let fill="#079b2d", peg="#00823a";
+  if(b.type === "type8"){ fill="#c73565"; peg="#e24c76"; }
+  if(b.type === "type9"){ fill="#8738c9"; peg="#b04cff"; }
+
+  rect(r.x,r.y,r.w,r.h,fill,"#18141d",3*S);
+  text(String(b.level),r.x+r.w/2,r.y+r.h/2,24,"#fff");
+
+  ctx.fillStyle = peg;
+  ctx.beginPath();
+  ctx.ellipse(r.x+r.w/2, r.y+r.h+14*S, 10*S, 29*S, 0, 0, Math.PI*2);
+  ctx.fill();
+  ctx.lineWidth = 3*S;
+  ctx.strokeStyle = "#18141d";
+  ctx.stroke();
+
+  if(b.type === "type8"){
+    ctx.beginPath();
+    ctx.ellipse(r.x+r.w/2, r.y-12*S, 10*S, 28*S, 0, 0, Math.PI*2);
+    ctx.fill();
+    ctx.stroke();
+  }
+  if(b.type === "type9"){
+    ctx.beginPath();
+    ctx.ellipse(r.x+r.w+13*S, r.y+r.h/2, 28*S, 9*S, 0, 0, Math.PI*2);
+    ctx.fill();
+    ctx.stroke();
+  }
+}
+
+function drawBlock(b){
+  const r = blockRect(b);
+  if(b.type === "tri") drawTriangle(b,r);
+  else drawNormalBlock(b,r);
+}
+
+function drawBall(b){
+  ctx.save();
+  ctx.translate(b.x,b.y);
+  ctx.rotate(state.time*6);
+  const colors = ["#f7f7f7","#f36d4a","#39bfe6","#f08c25"];
+  ctx.fillStyle = colors[b.skin] || "#fff";
+  ctx.beginPath();
+  ctx.arc(0,0,b.r,0,Math.PI*2);
+  ctx.fill();
+  ctx.lineWidth = 3*S;
+  ctx.strokeStyle = "#111";
+  ctx.stroke();
+  ctx.strokeStyle = "rgba(120,0,0,.55)";
+  ctx.lineWidth = 2*S;
+  ctx.beginPath();
+  ctx.moveTo(-b.r,0);
+  ctx.lineTo(b.r,0);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawEffects(){
+  for(const s of state.sparks){
+    ctx.globalAlpha = Math.max(0,Math.min(1,s.life*3));
+    ctx.fillStyle = s.color;
+    ctx.fillRect(s.x-2*S,s.y-2*S,4*S,4*S);
+  }
+  ctx.globalAlpha = 1;
+
+  for(const c of state.coinsFx){
+    ctx.globalAlpha = Math.max(0,Math.min(1,c.life*1.4));
+    coin(c.x,c.y,9*S);
+  }
+  ctx.globalAlpha = 1;
+
+  for(const t of state.texts){
+    ctx.globalAlpha = Math.max(0,Math.min(1,t.life));
+    text(t.t,t.x,t.y,t.size,t.color);
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawButton(title,line,cost,x,y,w,h,green,fn){
+  rect(x,y,w,h,green?"#078d22":"#3f3e40","#050505",5*S);
+  text(title,x+w/2,y+25*S,28,"#eeeeee");
+  text(line,x+w/2,y+58*S,26,line.includes(">")?"#2cff42":"#fff");
+  text("Buy",x+48*S,y+85*S,27,"#fff","left");
+  coin(x+140*S,y+85*S,13*S);
+  text(fmt(cost),x+176*S,y+85*S,26,state.coins>=cost?"#ffc21b":"#ef3b3b","left");
+  state.zones.push({x,y,w,h,fn});
+}
+
+function drawTrash(x,y,w,h){
+  rect(x,y,w,h,"#8e8e8e","#050505",5*S);
+  ctx.strokeStyle = "#595959";
+  ctx.lineWidth = 3*S;
+  ctx.strokeRect(x+w*.36,y+h*.35,w*.28,h*.38);
+  ctx.beginPath();
+  ctx.moveTo(x+w*.32,y+h*.30);
+  ctx.lineTo(x+w*.68,y+h*.30);
+  ctx.moveTo(x+w*.43,y+h*.42);
+  ctx.lineTo(x+w*.43,y+h*.68);
+  ctx.moveTo(x+w*.57,y+h*.42);
+  ctx.lineTo(x+w*.57,y+h*.68);
+  ctx.stroke();
+}
+
+function drawUI(){
+  state.zones.length = 0;
+
+  const coinX = ui.x + 230*S;
+  const coinY = grid.y + 20*S;
+
+  coin(coinX,coinY,16*S);
+  text(fmt(state.coins),coinX+40*S,coinY,42,"#ffc21b","left");
+
+  rect(coinX+245*S,coinY-30*S,82*S,82*S,"#078520","#050505",5*S);
+  text("☼",coinX+286*S,coinY+11*S,42,"#ddd");
+  state.zones.push({x:coinX+245*S,y:coinY-30*S,w:82*S,h:82*S,fn:()=>state.settings=true});
+
+  rect(ui.x-22*S,coinY-30*S,125*S,70*S,"#0796b7","#050505",5*S);
+  text("x2",ui.x+40*S,coinY-8*S,24,"#fff");
+  text("Bonus",ui.x+40*S,coinY+22*S,24,"#fff");
+  state.zones.push({x:ui.x-22*S,y:coinY-30*S,w:125*S,h:70*S,fn:()=>state.bonusPopup=true});
+
+  const x=ui.x,y=ui.y,w=ui.bw,h=ui.bh,g=ui.gap;
+  drawButton("New Block","+1",state.blockCost,x,y,w,h,true,buyBlock);
+  drawButton("New Ball",`${state.balls.length} > ${state.balls.length+1}`,state.ballCost,x+w+g,y,w,h,false,buyBall);
+  drawButton("Ball Income",`x${state.income.toFixed(1)} > x${(state.income+0.1).toFixed(1)}`,state.incomeCost,x,y+h+g,w,h,false,()=>upgrade("income"));
+  drawButton("Ball Speed",`${Math.round(state.speed*100)}% > ${Math.round((state.speed+0.02)*100)}%`,state.speedCost,x+w+g,y+h+g,w,h,false,()=>upgrade("speed"));
+  drawButton("Chance Crit",`${state.crit.toFixed(1)}% > ${(state.crit+2.4).toFixed(1)}%`,state.critCost,x,y+2*(h+g),w,h,true,()=>upgrade("crit"));
+  drawButton("Triple Income",`${state.triple.toFixed(1)}% > ${(state.triple+0.8).toFixed(1)}%`,state.tripleCost,x+w+g,y+2*(h+g),w,h,true,()=>upgrade("triple"));
+
+  const tx = x+10*S;
+  const ty = y+3*(h+g)+175*S;
+  drawTrash(tx,ty,88*S,88*S);
+  state.zones.push({x:tx,y:ty,w:88*S,h:88*S,fn:()=>{state.tool = state.tool==="trash" ? "move" : "trash"; state.placing=null;}});
+  if(state.tool === "trash"){
+    ctx.strokeStyle = "#ff3333";
+    ctx.lineWidth = 5*S;
+    ctx.strokeRect(tx-6*S,ty-6*S,100*S,100*S);
+  }
+
+  rect(x+w+g,y+3*(h+g)+160*S,w,84*S,"#4a5556","#050505",5*S);
+  text("Next Map",x+w+g+w/2,y+3*(h+g)+191*S,33,"#eee");
+  coin(x+w+g+82*S,y+3*(h+g)+224*S,14*S);
+  text("1.0M",x+w+g+115*S,y+3*(h+g)+224*S,29,"#ef3b3b","left");
+
+  if(state.placing){
+    text("Feld antippen zum Platzieren",grid.x+grid.size/2,grid.y-45*S,22,"#39ff4c");
+  }
+}
+
+function drawBonus(){
+  ctx.fillStyle = "rgba(0,0,0,.62)";
+  ctx.fillRect(0,0,W,H);
+  text("BONUS",W/2,H/2-165*S,58,"#fff");
+  rect(W/2-210*S,H/2-100*S,420*S,210*S,"#986833","#050505",5*S);
+  text("After watching a",W/2,H/2-45*S,25,"#fff");
+  text("short promotional",W/2,H/2-10*S,25,"#fff");
+  text("video, you receive",W/2,H/2+25*S,25,"#fff");
+  const reward = Math.max(60,Math.round((state.coins+30)*4));
+  coin(W/2-40*S,H/2+65*S,15*S);
+  text(fmt(reward),W/2+5*S,H/2+65*S,31,"#ffc21b","left");
+  rect(W/2-190*S,H/2+130*S,180*S,84*S,"#078a18","#050505",5*S);
+  text("YES",W/2-100*S,H/2+172*S,42,"#042900");
+  rect(W/2+20*S,H/2+130*S,180*S,84*S,"#b52b08","#050505",5*S);
+  text("NO",W/2+110*S,H/2+172*S,42,"#2b0800");
+}
+
+function drawSettings(){
+  ctx.fillStyle = "rgba(0,0,0,.58)";
+  ctx.fillRect(0,0,W,H);
+  rect(W/2-255*S,H/2-220*S,510*S,440*S,"#976934","#050505",5*S);
+  text("Setting",W/2,H/2-165*S,48,"#fff");
+  text("Text coin",W/2,H/2-40*S,34,"#fff");
+  rect(W/2-165*S,H/2+40*S,70*S,70*S,state.showTextCoins?"#119432":"#575757","#050505",5*S);
+  if(state.showTextCoins) text("✓",W/2-130*S,H/2+75*S,42,"#0f5");
+  text("Tippe Dreieck = drehen",W/2,H/2+10*S,23,"#fff");
+  text("Ziehe Block = bewegen",W/2,H/2+108*S,23,"#fff");
+  rect(W/2-60*S,H/2+135*S,120*S,84*S,"#cf342d","#050505",5*S);
+  text("X",W/2,H/2+177*S,58,"#fff");
+}
+
+function draw(){
+  ctx.fillStyle = "#3b3048";
+  ctx.fillRect(0,0,W,H);
+
+  drawBoard();
+  for(const b of state.blocks) drawBlock(b);
+  for(const b of state.balls) drawBall(b);
+  drawEffects();
+  drawUI();
+
+  if(state.bonusPopup) drawBonus();
+  if(state.settings) drawSettings();
+}
+
+let last = performance.now();
+function loop(now){
+  const dt = Math.min(0.033,(now-last)/1000);
+  last = now;
+  update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+
+resize();
+requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
