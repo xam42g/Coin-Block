@@ -1,0 +1,436 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<title>Ball Block Maze - Revised</title>
+<style>
+html,body{
+  margin:0;
+  padding:0;
+  width:100%;
+  height:100%;
+  overflow:hidden;
+  background:#3a3148;
+  font-family:monospace;
+  touch-action:none;
+}
+canvas{
+  width:100vw;
+  height:100vh;
+  display:block;
+  image-rendering:pixelated;
+}
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<script>
+(() => {
+const canvas=document.getElementById("game");
+const ctx=canvas.getContext("2d");
+ctx.imageSmoothingEnabled=false;
+
+let dpr=1,W=0,H=0,scale=1;
+const state={
+  coins:0,
+  blocks:[],
+  balls:[],
+  popups:[],
+  coinFx:[],
+  selected:null,
+  dragging:null,
+  dragOffsetX:0,
+  dragOffsetY:0,
+  placingNew:false,
+  blockCost:0,
+  blockBuyCount:0,
+  ballCost:500,
+  ballCount:1,
+  income:1,
+  incomeCost:100,
+  speed:1,
+  speedCost:1000,
+  crit:0,
+  critCost:450,
+  triple:0,
+  tripleCost:650,
+  bonus:null,
+  time:0,
+  settings:false,
+  nextId:1
+};
+
+const grid={cols:9,rows:9,x:0,y:0,size:0,cell:0};
+const ui={x:0,y:0,bw:0,bh:0,gap:0};
+const zones=[];
+
+function resize(){
+  dpr=Math.min(2,window.devicePixelRatio||1);
+  canvas.width=Math.floor(innerWidth*dpr);
+  canvas.height=Math.floor(innerHeight*dpr);
+  W=canvas.width; H=canvas.height;
+  scale=Math.min(W/1536,H/1024);
+
+  grid.size=Math.min(710*scale,H-220*scale,W*0.57);
+  grid.cell=Math.floor(grid.size/grid.cols);
+  grid.size=grid.cell*grid.cols;
+  grid.x=Math.max(145*scale,(W-grid.size-520*scale)/2);
+  grid.y=Math.max(175*scale,(H-grid.size)/2+30*scale);
+
+  ui.x=grid.x+grid.size+95*scale;
+  ui.y=grid.y+95*scale;
+  ui.bw=255*scale;
+  ui.bh=112*scale;
+  ui.gap=17*scale;
+}
+window.addEventListener("resize",resize);
+
+function fmt(v){
+  if(v>=1e6)return (v/1e6).toFixed(1)+"M";
+  if(v>=1e3)return (v/1e3).toFixed(v>=10000?0:1)+"K";
+  return Math.floor(v*10)/10+"";
+}
+function rect(x,y,w,h,fill,stroke="#080808",lw=5*scale){
+  ctx.fillStyle=fill; ctx.fillRect(x,y,w,h);
+  ctx.lineWidth=lw; ctx.strokeStyle=stroke; ctx.strokeRect(x,y,w,h);
+}
+function text(t,x,y,s,col="#fff",align="center"){
+  ctx.save();
+  ctx.font=`900 ${s*scale}px monospace`;
+  ctx.textAlign=align;
+  ctx.textBaseline="middle";
+  ctx.lineWidth=Math.max(3*scale,s*scale*.11);
+  ctx.strokeStyle="#202026";
+  ctx.strokeText(t,x,y);
+  ctx.fillStyle=col;
+  ctx.fillText(t,x,y);
+  ctx.restore();
+}
+function coin(x,y,r=16*scale){
+  ctx.beginPath(); ctx.fillStyle="#ffc21c"; ctx.arc(x,y,r,0,Math.PI*2); ctx.fill();
+  ctx.lineWidth=4*scale; ctx.strokeStyle="#4b3100"; ctx.stroke();
+  ctx.beginPath(); ctx.fillStyle="#e39d00"; ctx.arc(x,y,r*.48,0,Math.PI*2); ctx.fill();
+}
+function addZone(name,x,y,w,h,fn){zones.push({name,x,y,w,h,fn});}
+function inside(p,z){return p.x>=z.x&&p.x<=z.x+z.w&&p.y>=z.y&&p.y<=z.y+z.h;}
+function pointer(e){
+  const r=canvas.getBoundingClientRect();
+  return {x:(e.clientX-r.left)*dpr,y:(e.clientY-r.top)*dpr};
+}
+function cellAt(x,y){
+  const c=Math.floor((x-grid.x)/grid.cell);
+  const r=Math.floor((y-grid.y)/grid.cell);
+  if(c<0||r<0||c>=grid.cols||r>=grid.rows)return null;
+  return {c,r};
+}
+function blockAt(c,r,ignore=null){
+  return state.blocks.find(b=>b.c===c&&b.r===r&&b!==ignore);
+}
+function blockRect(b){
+  return {
+    x:grid.x+b.c*grid.cell+2*scale,
+    y:grid.y+b.r*grid.cell+2*scale,
+    w:grid.cell-4*scale,
+    h:grid.cell-4*scale
+  };
+}
+function addPopup(t,x,y,col="#ffc21c",s=24){
+  state.popups.push({t,x,y,col,s,life:1});
+}
+function earn(v,x,y){
+  let mult=state.income;
+  if(Math.random()*100<state.crit)mult*=2;
+  if(Math.random()*100<state.triple)mult*=3;
+  if(state.bonus && performance.now()<state.bonus)mult*=2;
+  const amount=v*mult;
+  state.coins+=amount;
+  addPopup("+"+fmt(amount),x,y,"#ffc21c",23);
+  for(let i=0;i<5;i++){
+    state.coinFx.push({x,y,vx:(Math.random()-.5)*130*scale,vy:-80*scale-Math.random()*100*scale,life:.7});
+  }
+}
+function init(){
+  resize();
+  state.blocks=[];
+  state.balls=[];
+  state.coins=0;
+  state.blockCost=0;
+  state.blockBuyCount=0;
+  state.ballCount=1;
+  addBall();
+}
+function addBall(){
+  // Fester Spawn wie im Original: rechts/oben am Spielfeldrand, gleicher Austrittspunkt.
+  const x=grid.x+grid.size-95*scale;
+  const y=grid.y+grid.cell*.75;
+  state.balls.push({x,y,vx:-170*scale,vy:115*scale,r:9*scale,lastHit:null,lastHitTime:0});
+}
+function buyBlock(){
+  if(state.coins<state.blockCost)return addPopup("NO COINS",ui.x+120*scale,ui.y-25*scale,"#ff3333",22);
+  state.coins-=state.blockCost;
+  state.blockBuyCount++;
+  state.blockCost=state.blockBuyCount===1?10:Math.round(10*Math.pow(1.55,state.blockBuyCount-1));
+  state.placingNew=true;
+  addPopup("PLACE BLOCK",grid.x+grid.size/2,grid.y-24*scale,"#34ff4c",24);
+}
+function buyBall(){
+  if(state.coins<state.ballCost)return addPopup("NO COINS",ui.x+380*scale,ui.y-25*scale,"#ff3333",22);
+  state.coins-=state.ballCost;
+  state.ballCount++;
+  state.ballCost=Math.round(state.ballCost*2.5);
+  addBall();
+}
+function upgrade(type){
+  if(type==="income"){
+    if(state.coins<state.incomeCost)return;
+    state.coins-=state.incomeCost; state.income=Math.round((state.income+.1)*10)/10; state.incomeCost=Math.round(state.incomeCost*1.85);
+  }
+  if(type==="speed"){
+    if(state.coins<state.speedCost)return;
+    state.coins-=state.speedCost; state.speed=Math.round((state.speed+.02)*100)/100; state.speedCost=Math.round(state.speedCost*1.8);
+  }
+  if(type==="crit"){
+    if(state.coins<state.critCost)return;
+    state.coins-=state.critCost; state.crit=Math.round((state.crit+2.4)*10)/10; state.critCost=Math.round(state.critCost*1.85);
+  }
+  if(type==="triple"){
+    if(state.coins<state.tripleCost)return;
+    state.coins-=state.tripleCost; state.triple=Math.round((state.triple+.8)*10)/10; state.tripleCost=Math.round(state.tripleCost*1.85);
+  }
+}
+function showBonus(){
+  state.bonusPopup=true;
+}
+function acceptBonus(){
+  state.bonus=performance.now()+180000;
+  state.bonusPopup=false;
+}
+canvas.addEventListener("pointerdown",e=>{
+  const p=pointer(e);
+  if(state.bonusPopup){
+    const yes={x:W/2-190*scale,y:H/2+130*scale,w:180*scale,h:85*scale};
+    const no={x:W/2+20*scale,y:H/2+130*scale,w:180*scale,h:85*scale};
+    if(inside(p,yes))acceptBonus();
+    else if(inside(p,no))state.bonusPopup=false;
+    return;
+  }
+  for(const z of zones){if(inside(p,z)){z.fn();return;}}
+  const cell=cellAt(p.x,p.y);
+  if(!cell)return;
+
+  const existing=blockAt(cell.c,cell.r);
+
+  if(state.placingNew){
+    if(!existing){
+      // Wichtig: neuer gekaufter Block ist immer Startblock Level 1 / Dreieck-Startblock je nach frühen Screens.
+      // Hier: erster Block als rotes Dreieck, danach normale Level-1-Blöcke.
+      const kind=state.blockBuyCount===1?"tri":"block";
+      state.blocks.push({id:state.nextId++,c:cell.c,r:cell.r,kind,level:1,rot:0});
+      state.placingNew=false;
+    }
+    return;
+  }
+
+  if(existing){
+    state.dragging=existing;
+    state.dragOffsetX=p.x-(grid.x+existing.c*grid.cell);
+    state.dragOffsetY=p.y-(grid.y+existing.r*grid.cell);
+  }
+});
+canvas.addEventListener("pointermove",e=>{
+  if(!state.dragging)return;
+  const p=pointer(e);
+  state.dragging.drawX=p.x-state.dragOffsetX;
+  state.dragging.drawY=p.y-state.dragOffsetY;
+});
+canvas.addEventListener("pointerup",e=>{
+  if(!state.dragging)return;
+  const p=pointer(e);
+  const cell=cellAt(p.x,p.y);
+  if(cell && !blockAt(cell.c,cell.r,state.dragging)){
+    state.dragging.c=cell.c;
+    state.dragging.r=cell.r;
+  }
+  state.dragging.drawX=null;
+  state.dragging.drawY=null;
+  state.dragging=null;
+});
+
+function hitBallBlock(ball,b){
+  const now=performance.now();
+  if(ball.lastHit===b.id && now-ball.lastHitTime<170)return;
+  ball.lastHit=b.id; ball.lastHitTime=now;
+
+  const r=blockRect(b);
+  earn(b.kind==="tri"?1:b.level,ball.x,ball.y);
+
+  if(b.kind==="tri"){
+    // Dreieck lenkt Ball sauber um. Rotation aktuell fest; später kann man Rotation per Button ergänzen.
+    const cx=r.x+r.w/2, cy=r.y+r.h/2;
+    if(ball.x<cx && ball.y<cy){ball.vx=-Math.abs(ball.vx);ball.vy=-Math.abs(ball.vy);}
+    else if(ball.x>cx && ball.y<cy){ball.vx=Math.abs(ball.vx);ball.vy=-Math.abs(ball.vy);}
+    else if(ball.x<cx && ball.y>cy){ball.vx=-Math.abs(ball.vx);ball.vy=Math.abs(ball.vy);}
+    else {ball.vx=Math.abs(ball.vx);ball.vy=Math.abs(ball.vy);}
+  }else{
+    const cx=r.x+r.w/2,cy=r.y+r.h/2;
+    const dx=ball.x-cx,dy=ball.y-cy;
+    if(Math.abs(dx)>Math.abs(dy))ball.vx*=-1;
+    else ball.vy*=-1;
+  }
+}
+function circleRect(ball,r){
+  const nx=Math.max(r.x,Math.min(ball.x,r.x+r.w));
+  const ny=Math.max(r.y,Math.min(ball.y,r.y+r.h));
+  const dx=ball.x-nx,dy=ball.y-ny;
+  return dx*dx+dy*dy<=ball.r*ball.r;
+}
+function update(dt){
+  state.time+=dt;
+  for(const ball of state.balls){
+    ball.x+=ball.vx*dt*state.speed;
+    ball.y+=ball.vy*dt*state.speed;
+
+    if(ball.x-ball.r<grid.x){ball.x=grid.x+ball.r;ball.vx=Math.abs(ball.vx);}
+    if(ball.x+ball.r>grid.x+grid.size){ball.x=grid.x+grid.size-ball.r;ball.vx=-Math.abs(ball.vx);}
+    if(ball.y-ball.r<grid.y){ball.y=grid.y+ball.r;ball.vy=Math.abs(ball.vy);}
+    if(ball.y+ball.r>grid.y+grid.size){ball.y=grid.y+grid.size-ball.r;ball.vy=-Math.abs(ball.vy);}
+
+    for(const b of state.blocks){
+      if(b===state.dragging)continue;
+      if(circleRect(ball,blockRect(b)))hitBallBlock(ball,b);
+    }
+  }
+
+  for(let i=state.popups.length-1;i>=0;i--){
+    const p=state.popups[i]; p.life-=dt; p.y-=45*scale*dt;
+    if(p.life<=0)state.popups.splice(i,1);
+  }
+  for(let i=state.coinFx.length-1;i>=0;i--){
+    const c=state.coinFx[i]; c.life-=dt; c.vy+=240*scale*dt; c.x+=c.vx*dt; c.y+=c.vy*dt;
+    if(c.life<=0)state.coinFx.splice(i,1);
+  }
+}
+function drawBoard(){
+  const pipe=24*scale;
+  rect(grid.x-pipe,grid.y-pipe,grid.size+pipe*2,grid.size+pipe*2,"#9bb9c5","#2c2733",6*scale);
+  ctx.fillStyle="#bcd8d8"; ctx.fillRect(grid.x,grid.y,grid.size,grid.size);
+  ctx.lineWidth=4*scale; ctx.strokeStyle="#352e43";
+  for(let i=0;i<=grid.cols;i++){ctx.beginPath();ctx.moveTo(grid.x+i*grid.cell,grid.y);ctx.lineTo(grid.x+i*grid.cell,grid.y+grid.size);ctx.stroke();}
+  for(let j=0;j<=grid.rows;j++){ctx.beginPath();ctx.moveTo(grid.x,grid.y+j*grid.cell);ctx.lineTo(grid.x+grid.size,grid.y+j*grid.cell);ctx.stroke();}
+  ctx.fillStyle="#706778";
+  ctx.fillRect(grid.x+grid.size/2-20*scale,grid.y-pipe-75*scale,40*scale,75*scale);
+}
+function drawTri(r){
+  ctx.fillStyle="#db4055";
+  ctx.beginPath();ctx.moveTo(r.x,r.y);ctx.lineTo(r.x+r.w,r.y);ctx.lineTo(r.x+r.w,r.y+r.h);ctx.closePath();ctx.fill();
+  ctx.lineWidth=3*scale;ctx.strokeStyle="#1a171f";ctx.stroke();
+  ctx.strokeStyle="#fff";ctx.lineWidth=5*scale;
+  ctx.beginPath();ctx.moveTo(r.x+r.w*.68,r.y+r.h*.36);ctx.lineTo(r.x+r.w*.78,r.y+r.h*.24);ctx.stroke();
+}
+function drawBlock(b){
+  let r=blockRect(b);
+  if(b.drawX!==null && b.drawX!==undefined)r={x:b.drawX+2*scale,y:b.drawY+2*scale,w:grid.cell-4*scale,h:grid.cell-4*scale};
+  if(b.kind==="tri")drawTri(r);
+  else{
+    rect(r.x,r.y,r.w,r.h,"#009b2d","#1b1720",3*scale);
+    text(String(b.level),r.x+r.w/2,r.y+r.h/2,25,"#fff");
+    ctx.beginPath();ctx.fillStyle="#00833a";ctx.ellipse(r.x+r.w/2,r.y+r.h+14*scale,10*scale,30*scale,0,0,Math.PI*2);ctx.fill();
+    ctx.lineWidth=3*scale;ctx.strokeStyle="#17131b";ctx.stroke();
+  }
+}
+function drawBall(b){
+  ctx.save();ctx.translate(b.x,b.y);ctx.rotate(state.time*5);
+  ctx.fillStyle="#f4f4f4";ctx.beginPath();ctx.arc(0,0,b.r,0,Math.PI*2);ctx.fill();
+  ctx.lineWidth=3*scale;ctx.strokeStyle="#111";ctx.stroke();
+  ctx.strokeStyle="#c93030";ctx.lineWidth=2*scale;ctx.beginPath();ctx.moveTo(-b.r,0);ctx.lineTo(b.r,0);ctx.stroke();
+  ctx.restore();
+}
+function drawButton(title,line,cost,x,y,w,h,green,fn){
+  rect(x,y,w,h,green?"#078c21":"#3f3f40","#060606",5*scale);
+  text(title,x+w/2,y+25*scale,29,"#eee");
+  text(line,x+w/2,y+59*scale,27,line.includes(">")?"#27ef39":"#fff");
+  text("Buy",x+50*scale,y+86*scale,28,"#fff","left");
+  coin(x+142*scale,y+86*scale,13*scale);
+  text(fmt(cost),x+178*scale,y+86*scale,27,state.coins>=cost?"#ffc21c":"#f13b3b","left");
+  addZone(title,x,y,w,h,fn);
+}
+function drawUI(){
+  zones.length=0;
+  const coinX=ui.x+240*scale, coinY=grid.y+20*scale;
+  coin(coinX,coinY,16*scale); text(fmt(state.coins),coinX+42*scale,coinY,43,"#ffc21c","left");
+
+  rect(coinX+255*scale,coinY-30*scale,85*scale,85*scale,"#088521","#050505",5*scale);
+  text("⚙",coinX+297*scale,coinY+12*scale,40,"#ddd");
+  addZone("settings",coinX+255*scale,coinY-30*scale,85*scale,85*scale,()=>state.settings=!state.settings);
+
+  rect(ui.x-25*scale,coinY-30*scale,130*scale,72*scale,"#0796b5","#050505",5*scale);
+  text("x2",ui.x+40*scale,coinY-6*scale,25,"#fff");
+  text("Bonus",ui.x+40*scale,coinY+24*scale,25,"#fff");
+  addZone("bonus",ui.x-25*scale,coinY-30*scale,130*scale,72*scale,showBonus);
+
+  const x=ui.x,y=ui.y,w=ui.bw,h=ui.bh,g=ui.gap;
+  drawButton("New Block","+1",state.blockCost,x,y,w,h,true,buyBlock);
+  drawButton("New Ball",`${state.ballCount} > ${state.ballCount+1}`,state.ballCost,x+w+g,y,w,h,false,buyBall);
+  drawButton("Ball Income",`x${state.income.toFixed(1)} > x${(state.income+.1).toFixed(1)}`,state.incomeCost,x,y+h+g,w,h,false,()=>upgrade("income"));
+  drawButton("Ball Speed",`${Math.round(state.speed*100)}% > ${Math.round((state.speed+.02)*100)}%`,state.speedCost,x+w+g,y+h+g,w,h,false,()=>upgrade("speed"));
+  drawButton("Chance Crit",`${state.crit.toFixed(1)}% > ${(state.crit+2.4).toFixed(1)}%`,state.critCost,x,y+2*(h+g),w,h,true,()=>upgrade("crit"));
+  drawButton("Triple Income",`${state.triple.toFixed(1)}% > ${(state.triple+.8).toFixed(1)}%`,state.tripleCost,x+w+g,y+2*(h+g),w,h,true,()=>upgrade("triple"));
+
+  rect(x+10*scale,y+3*(h+g)+178*scale,90*scale,90*scale,"#8d8d8d","#050505",5*scale);
+  text("🗑",x+55*scale,y+3*(h+g)+223*scale,42,"#ddd");
+  rect(x+w+g,y+3*(h+g)+160*scale,w,85*scale,"#4b5657","#050505",5*scale);
+  text("Next Map",x+w+g+w/2,y+3*(h+g)+192*scale,34,"#eee");
+  coin(x+w+g+82*scale,y+3*(h+g)+226*scale,14*scale);
+  text("1.0M",x+w+g+115*scale,y+3*(h+g)+226*scale,30,"#f13b3b","left");
+}
+function drawFx(){
+  for(const c of state.coinFx){ctx.globalAlpha=Math.max(0,c.life);coin(c.x,c.y,10*scale);}
+  ctx.globalAlpha=1;
+  for(const p of state.popups){ctx.globalAlpha=Math.max(0,p.life);text(p.t,p.x,p.y,p.s,p.col);}
+  ctx.globalAlpha=1;
+}
+function drawBonusPopup(){
+  ctx.fillStyle="rgba(0,0,0,.6)";ctx.fillRect(0,0,W,H);
+  text("BONUS",W/2,H/2-165*scale,58,"#fff");
+  rect(W/2-210*scale,H/2-100*scale,420*scale,210*scale,"#986734","#050505",5*scale);
+  text("After watching the",W/2,H/2-35*scale,27,"#fff");
+  text("ad you will get",W/2,H/2,27,"#fff");
+  text("x2 for 180 seconds",W/2,H/2+45*scale,31,"#17ef39");
+  rect(W/2-190*scale,H/2+130*scale,180*scale,85*scale,"#078a18","#050505",5*scale);
+  text("YES",W/2-100*scale,H/2+172*scale,42,"#062b00");
+  rect(W/2+20*scale,H/2+130*scale,180*scale,85*scale,"#b5300b","#050505",5*scale);
+  text("NO",W/2+110*scale,H/2+172*scale,42,"#2b0800");
+}
+function drawSettings(){
+  ctx.fillStyle="rgba(0,0,0,.55)";ctx.fillRect(0,0,W,H);
+  rect(W/2-250*scale,H/2-210*scale,500*scale,420*scale,"#966832","#050505",5*scale);
+  text("Setting",W/2,H/2-160*scale,48,"#fff");
+  text("Clean version",W/2,H/2-40*scale,30,"#fff");
+  text("Drag blocks to move them",W/2,H/2+10*scale,25,"#fff");
+  rect(W/2-60*scale,H/2+120*scale,120*scale,85*scale,"#cf342d","#050505",5*scale);
+  text("X",W/2,H/2+162*scale,58,"#fff");
+  addZone("close",W/2-60*scale,H/2+120*scale,120*scale,85*scale,()=>state.settings=false);
+}
+function draw(){
+  ctx.fillStyle="#3a3148";ctx.fillRect(0,0,W,H);
+  drawBoard();
+  for(const b of state.blocks)drawBlock(b);
+  for(const b of state.balls)drawBall(b);
+  drawFx();
+  drawUI();
+  if(state.bonusPopup)drawBonusPopup();
+  if(state.settings)drawSettings();
+}
+let last=performance.now();
+function loop(now){
+  const dt=Math.min(.035,(now-last)/1000);last=now;
+  update(dt);draw();
+  requestAnimationFrame(loop);
+}
+init();
+requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
