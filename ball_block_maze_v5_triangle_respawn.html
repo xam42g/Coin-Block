@@ -1,0 +1,910 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Ball Block Maze - Clean Build</title>
+<style>
+html,body{
+  margin:0;
+  width:100%;
+  height:100%;
+  overflow:hidden;
+  background:#3b3048;
+  touch-action:none;
+  user-select:none;
+  -webkit-user-select:none;
+}
+canvas{
+  display:block;
+  width:100vw;
+  height:100vh;
+  image-rendering:pixelated;
+  background:#3b3048;
+}
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<script>
+(() => {
+"use strict";
+
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+ctx.imageSmoothingEnabled = false;
+
+let DPR = 1, W = 0, H = 0, S = 1;
+
+const grid = {
+  cols: 9,
+  rows: 9,
+  x: 0,
+  y: 0,
+  cell: 72,
+  size: 648
+};
+
+const shop = {
+  x: 0,
+  y: 0,
+  bw: 250,
+  bh: 110,
+  gap: 16
+};
+
+const game = {
+  coins: 0,
+  blocks: [],
+  balls: [],
+  texts: [],
+  coinParticles: [],
+  sparks: [],
+  zones: [],
+  placing: null,
+  dragging: null,
+  dragDX: 0,
+  dragDY: 0,
+  time: 0,
+  blockCost: 0,
+  blocksBought: 0,
+  ballCost: 500,
+  income: 1.5,
+  incomeCost: 60,
+  speed: 1.15,
+  speedCost: 300,
+  crit: 0,
+  critCost: 250,
+  triple: 0,
+  tripleCost: 350,
+  nextId: 1,
+  selectedTool: "move",
+  bonusOpen: false,
+  settingsOpen: false,
+  textCoins: true,
+  spawnAccumulator: 0
+};
+
+function resize(){
+  DPR = Math.min(2, window.devicePixelRatio || 1);
+  canvas.width = Math.floor(innerWidth * DPR);
+  canvas.height = Math.floor(innerHeight * DPR);
+  W = canvas.width;
+  H = canvas.height;
+  S = Math.min(W/1536, H/1024);
+
+  grid.size = Math.min(690*S, H - 215*S, W * 0.56);
+  grid.cell = Math.floor(grid.size / grid.cols);
+  grid.size = grid.cell * grid.cols;
+  grid.x = Math.max(150*S, (W - grid.size - 530*S) / 2);
+  grid.y = Math.max(175*S, (H - grid.size) / 2 + 30*S);
+
+  shop.x = grid.x + grid.size + 86*S;
+  shop.y = grid.y + 95*S;
+  shop.bw = 250*S;
+  shop.bh = 110*S;
+  shop.gap = 16*S;
+
+  if(game.balls.length === 0) addBall();
+}
+window.addEventListener("resize", resize);
+
+function fmt(n){
+  if(n >= 1e9) return (n/1e9).toFixed(1) + "B";
+  if(n >= 1e6) return (n/1e6).toFixed(1) + "M";
+  if(n >= 1e3) return (n/1e3).toFixed(n>=10000?0:1) + "K";
+  return (Math.round(n*10)/10).toString();
+}
+
+function clamp(v,a,b){ return Math.max(a, Math.min(b, v)); }
+
+function rect(x,y,w,h,fill,stroke="#080808",line=5*S){
+  ctx.fillStyle = fill;
+  ctx.fillRect(x,y,w,h);
+  ctx.lineWidth = line;
+  ctx.strokeStyle = stroke;
+  ctx.strokeRect(x,y,w,h);
+}
+
+function pixelText(str,x,y,size,color="#fff",align="center"){
+  ctx.save();
+  ctx.font = `900 ${size*S}px monospace`;
+  ctx.textAlign = align;
+  ctx.textBaseline = "middle";
+  ctx.lineWidth = Math.max(3*S, size*S*0.12);
+  ctx.strokeStyle = "#242129";
+  ctx.strokeText(str,x,y);
+  ctx.fillStyle = color;
+  ctx.fillText(str,x,y);
+  ctx.restore();
+}
+
+function drawCoin(x,y,r=15*S){
+  ctx.beginPath();
+  ctx.fillStyle = "#ffc21b";
+  ctx.arc(x,y,r,0,Math.PI*2);
+  ctx.fill();
+  ctx.lineWidth = 4*S;
+  ctx.strokeStyle = "#4d3100";
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.fillStyle = "#e59d00";
+  ctx.arc(x,y,r*0.47,0,Math.PI*2);
+  ctx.fill();
+}
+
+function addText(text,x,y,color="#ffc21b",size=23){
+  if(!game.textCoins && text.startsWith("+")) return;
+  game.texts.push({text,x,y,color,size,life:1,vy:-45*S});
+}
+
+function addCoinBurst(x,y,count=6){
+  for(let i=0;i<count;i++){
+    const a = Math.random()*Math.PI*2;
+    const sp = 50*S + Math.random()*130*S;
+    game.coinParticles.push({
+      x,y,
+      vx:Math.cos(a)*sp,
+      vy:Math.sin(a)*sp - 85*S,
+      life:0.75 + Math.random()*0.25
+    });
+  }
+}
+
+function addSparks(x,y,color="#ffc21b",count=7){
+  for(let i=0;i<count;i++){
+    const a = Math.random()*Math.PI*2;
+    const sp = 45*S + Math.random()*150*S;
+    game.sparks.push({
+      x,y,
+      vx:Math.cos(a)*sp,
+      vy:Math.sin(a)*sp,
+      color,
+      life:0.28 + Math.random()*0.22
+    });
+  }
+}
+
+function cellAt(x,y){
+  const c = Math.floor((x-grid.x)/grid.cell);
+  const r = Math.floor((y-grid.y)/grid.cell);
+  if(c<0 || r<0 || c>=grid.cols || r>=grid.rows) return null;
+  return {c,r};
+}
+
+function blockAt(c,r,ignore=null){
+  for(const b of game.blocks){
+    if(b !== ignore && b.c === c && b.r === r) return b;
+  }
+  return null;
+}
+
+function blockScreenRect(b){
+  if(game.dragging === b && b.dragX !== undefined){
+    return {x:b.dragX + 2*S, y:b.dragY + 2*S, w:grid.cell-4*S, h:grid.cell-4*S};
+  }
+  return {
+    x:grid.x + b.c*grid.cell + 2*S,
+    y:grid.y + b.r*grid.cell + 2*S,
+    w:grid.cell - 4*S,
+    h:grid.cell - 4*S
+  };
+}
+
+function addBall(){
+  const y = grid.y + grid.size * 0.50;
+  game.balls.push({
+    x:grid.x + 10*S,
+    y,
+    vx:210*S,
+    vy:0,
+    r:9*S,
+    lastBlock:null,
+    lastHit:0,
+    born:performance.now(),
+    skin: Math.floor(Math.random()*4)
+  });
+}
+
+function respawnBall(ball){
+  ball.x = grid.x + 10*S;
+  ball.y = grid.y + grid.size * 0.50;
+  ball.vx = 210*S;
+  ball.vy = 0;
+  ball.lastBlock = null;
+  ball.lastHit = 0;
+  ball.born = performance.now();
+  ball.skin = Math.floor(Math.random()*4);
+  addSparks(ball.x, ball.y, "#8adf70", 8);
+}
+
+function buyBlock(){
+  if(game.coins + 0.00001 < game.blockCost){
+    addText("NO COINS", shop.x + 120*S, shop.y - 24*S, "#ff3636", 22);
+    return;
+  }
+  game.coins -= game.blockCost;
+  game.blocksBought += 1;
+
+  const costIndex = game.blocksBought;
+  game.blockCost = costIndex === 1 ? 5 : Math.round(5 * Math.pow(1.55, costIndex-1));
+
+  // Original-Logik als stabile Basis:
+  // New Block gibt immer ein neues Startteil, niemals direkt Level 2/8/9.
+  // Spätere Spezialteile sind trotzdem Level 1 und klar als Startteil.
+  let type = "normal";
+  if(costIndex === 1 || costIndex === 4 || costIndex === 7) type = "tri";
+  if(costIndex === 10) type = "type8";
+  if(costIndex === 12) type = "type9";
+
+  game.placing = {type, level:1, rot:0};
+  game.selectedTool = "place";
+  addText("TAP FIELD", grid.x + grid.size/2, grid.y - 35*S, "#39ff4c", 24);
+}
+
+function buyBall(){
+  if(game.coins < game.ballCost){
+    addText("NO COINS", shop.x + 370*S, shop.y - 24*S, "#ff3636", 22);
+    return;
+  }
+  game.coins -= game.ballCost;
+  game.ballCost = Math.round(game.ballCost * 2.55);
+  addBall();
+  addText("+BALL", shop.x + 390*S, shop.y - 24*S, "#fff", 23);
+}
+
+function upgrade(kind){
+  if(kind === "income"){
+    if(game.coins < game.incomeCost) return addText("NO COINS", shop.x+115*S, shop.y+shop.bh+shop.gap-22*S, "#ff3636", 20);
+    game.coins -= game.incomeCost;
+    game.income = Math.round((game.income + 0.1)*10)/10;
+    game.incomeCost = Math.round(game.incomeCost * 1.88);
+  }
+  if(kind === "speed"){
+    if(game.coins < game.speedCost) return addText("NO COINS", shop.x+370*S, shop.y+shop.bh+shop.gap-22*S, "#ff3636", 20);
+    game.coins -= game.speedCost;
+    game.speed = Math.round((game.speed + 0.02)*100)/100;
+    game.speedCost = Math.round(game.speedCost * 1.82);
+  }
+  if(kind === "crit"){
+    if(game.coins < game.critCost) return addText("NO COINS", shop.x+115*S, shop.y+2*(shop.bh+shop.gap)-22*S, "#ff3636", 20);
+    game.coins -= game.critCost;
+    game.crit = Math.round((game.crit + 2.4)*10)/10;
+    game.critCost = Math.round(game.critCost * 1.86);
+  }
+  if(kind === "triple"){
+    if(game.coins < game.tripleCost) return addText("NO COINS", shop.x+370*S, shop.y+2*(shop.bh+shop.gap)-22*S, "#ff3636", 20);
+    game.coins -= game.tripleCost;
+    game.triple = Math.round((game.triple + 0.8)*10)/10;
+    game.tripleCost = Math.round(game.tripleCost * 1.9);
+  }
+}
+
+function placeBlock(c,r){
+  if(!game.placing) return;
+  if(blockAt(c,r)){
+    addText("FULL", grid.x+c*grid.cell+grid.cell/2, grid.y+r*grid.cell+grid.cell/2, "#ff3838", 20);
+    return;
+  }
+  game.blocks.push({
+    id:game.nextId++,
+    c,r,
+    type:game.placing.type,
+    level:game.placing.level,
+    rot:game.placing.rot
+  });
+  addSparks(grid.x+c*grid.cell+grid.cell/2, grid.y+r*grid.cell+grid.cell/2, "#ffffff", 10);
+  game.placing = null;
+  game.selectedTool = "move";
+}
+
+function deleteBlock(c,r){
+  const b = blockAt(c,r);
+  if(!b) return;
+  game.blocks.splice(game.blocks.indexOf(b),1);
+  addText("DEL", grid.x+c*grid.cell+grid.cell/2, grid.y+r*grid.cell+grid.cell/2, "#fff", 20);
+}
+
+function rotateBlock(b){
+  if(!b || b.type !== "tri") return;
+  b.rot = (b.rot + 1) % 4;
+  addSparks(grid.x+b.c*grid.cell+grid.cell/2, grid.y+b.r*grid.cell+grid.cell/2, "#ffffff", 5);
+}
+
+function earn(value,x,y){
+  let mult = game.income;
+  const crit = Math.random()*100 < game.crit;
+  const triple = Math.random()*100 < game.triple;
+  if(crit) mult *= 2;
+  if(triple) mult *= 3;
+  const amount = value * mult;
+  game.coins += amount;
+  addText("+"+fmt(amount),x,y, crit||triple ? "#ff4fc3" : "#ffc21b", crit||triple ? 29 : 23);
+  addCoinBurst(x,y, crit||triple ? 9 : 5);
+}
+
+function pointer(e){
+  const r = canvas.getBoundingClientRect();
+  return {x:(e.clientX-r.left)*DPR, y:(e.clientY-r.top)*DPR};
+}
+
+function hitZone(p){
+  for(const z of game.zones){
+    if(p.x>=z.x && p.x<=z.x+z.w && p.y>=z.y && p.y<=z.y+z.h) return z;
+  }
+  return null;
+}
+
+canvas.addEventListener("pointerdown", e => {
+  const p = pointer(e);
+
+  if(game.bonusOpen){
+    const yes = {x:W/2-190*S,y:H/2+130*S,w:180*S,h:84*S};
+    const no = {x:W/2+20*S,y:H/2+130*S,w:180*S,h:84*S};
+    if(p.x>=yes.x&&p.x<=yes.x+yes.w&&p.y>=yes.y&&p.y<=yes.y+yes.h){
+      game.coins += Math.max(50, Math.round((game.coins+25)*4));
+      addText("BONUS", W/2, H/2-160*S, "#ffc21b", 34);
+      game.bonusOpen = false;
+    } else if(p.x>=no.x&&p.x<=no.x+no.w&&p.y>=no.y&&p.y<=no.y+no.h){
+      game.bonusOpen = false;
+    }
+    return;
+  }
+
+  if(game.settingsOpen){
+    const close = {x:W/2-60*S,y:H/2+135*S,w:120*S,h:84*S};
+    const toggle = {x:W/2-165*S,y:H/2+40*S,w:70*S,h:70*S};
+    if(p.x>=close.x&&p.x<=close.x+close.w&&p.y>=close.y&&p.y<=close.y+close.h) game.settingsOpen=false;
+    else if(p.x>=toggle.x&&p.x<=toggle.x+toggle.w&&p.y>=toggle.y&&p.y<=toggle.y+toggle.h) game.textCoins=!game.textCoins;
+    return;
+  }
+
+  const z = hitZone(p);
+  if(z){ z.fn(); return; }
+
+  const cell = cellAt(p.x,p.y);
+  if(!cell) return;
+
+  if(game.selectedTool === "trash"){
+    deleteBlock(cell.c, cell.r);
+    return;
+  }
+
+  if(game.placing){
+    placeBlock(cell.c, cell.r);
+    return;
+  }
+
+  const b = blockAt(cell.c, cell.r);
+  if(b){
+    game.dragging = b;
+    game.dragMoved = false;
+    b.dragX = grid.x + b.c*grid.cell;
+    b.dragY = grid.y + b.r*grid.cell;
+    game.dragDX = p.x - b.dragX;
+    game.dragDY = p.y - b.dragY;
+    game.dragStartX = p.x;
+    game.dragStartY = p.y;
+  }
+});
+
+canvas.addEventListener("pointermove", e => {
+  if(!game.dragging) return;
+  const p = pointer(e);
+  if(Math.hypot(p.x-game.dragStartX, p.y-game.dragStartY) > 8*S) game.dragMoved = true;
+  game.dragging.dragX = p.x - game.dragDX;
+  game.dragging.dragY = p.y - game.dragDY;
+});
+
+canvas.addEventListener("pointerup", e => {
+  if(!game.dragging) return;
+  const p = pointer(e);
+  const b = game.dragging;
+  const cell = cellAt(p.x,p.y);
+
+  if(!game.dragMoved){
+    rotateBlock(b);
+  } else if(cell && !blockAt(cell.c, cell.r, b)){
+    b.c = cell.c;
+    b.r = cell.r;
+  }
+
+  delete b.dragX;
+  delete b.dragY;
+  game.dragging = null;
+});
+
+function circleRect(ball,r){
+  const nx = clamp(ball.x, r.x, r.x+r.w);
+  const ny = clamp(ball.y, r.y, r.y+r.h);
+  const dx = ball.x-nx;
+  const dy = ball.y-ny;
+  return dx*dx + dy*dy <= ball.r*ball.r;
+}
+
+function snapBallOut(ball,r){
+  const left = Math.abs((ball.x+ball.r)-r.x);
+  const right = Math.abs((r.x+r.w)-(ball.x-ball.r));
+  const top = Math.abs((ball.y+ball.r)-r.y);
+  const bottom = Math.abs((r.y+r.h)-(ball.y-ball.r));
+  const m = Math.min(left,right,top,bottom);
+  if(m === left) ball.x = r.x - ball.r - 0.5*S;
+  else if(m === right) ball.x = r.x + r.w + ball.r + 0.5*S;
+  else if(m === top) ball.y = r.y - ball.r - 0.5*S;
+  else ball.y = r.y + r.h + ball.r + 0.5*S;
+}
+
+function reflectNormal(ball,r){
+  const cx = r.x + r.w/2;
+  const cy = r.y + r.h/2;
+  const dx = ball.x - cx;
+  const dy = ball.y - cy;
+
+  if(Math.abs(dx) > Math.abs(dy)){
+    ball.vx = dx > 0 ? Math.abs(ball.vx || 175*S) : -Math.abs(ball.vx || 175*S);
+  } else {
+    ball.vy = dy > 0 ? Math.abs(ball.vy || 175*S) : -Math.abs(ball.vy || 175*S);
+  }
+}
+
+function triangleReflect(ball,b){
+  const sp = 210*S;
+  const vx = ball.vx;
+  const vy = ball.vy;
+
+  // Saubere 90-Grad-Ablenkung.
+  // Wichtigster Fall aus deinem Screenshot:
+  // Ball kommt von rechts nach links auf dieses Dreieck -> geht nach unten.
+  if(b.rot === 0){
+    if(Math.abs(vx) >= Math.abs(vy)){
+      ball.vx = 0;
+      ball.vy = vx < 0 ? sp : -sp;
+    } else {
+      ball.vy = 0;
+      ball.vx = vy > 0 ? sp : -sp;
+    }
+  } else if(b.rot === 1){
+    if(Math.abs(vx) >= Math.abs(vy)){
+      ball.vx = 0;
+      ball.vy = vx < 0 ? -sp : sp;
+    } else {
+      ball.vy = 0;
+      ball.vx = vy > 0 ? sp : -sp;
+    }
+  } else if(b.rot === 2){
+    if(Math.abs(vx) >= Math.abs(vy)){
+      ball.vx = 0;
+      ball.vy = vx < 0 ? -sp : sp;
+    } else {
+      ball.vy = 0;
+      ball.vx = vy > 0 ? -sp : sp;
+    }
+  } else {
+    if(Math.abs(vx) >= Math.abs(vy)){
+      ball.vx = 0;
+      ball.vy = vx < 0 ? sp : -sp;
+    } else {
+      ball.vy = 0;
+      ball.vx = vy > 0 ? -sp : sp;
+    }
+  }
+}
+
+function handleBallBlock(ball,b){
+  const now = performance.now();
+  if(ball.lastBlock === b.id && now-ball.lastHit < 150) return;
+  ball.lastBlock = b.id;
+  ball.lastHit = now;
+
+  const r = blockScreenRect(b);
+  const value = b.type === "tri" ? 1 : b.level;
+  earn(value, ball.x, ball.y);
+
+  if(b.type === "tri"){
+    triangleReflect(ball,b);
+  } else if(b.type === "type8"){
+    reflectNormal(ball,r);
+    if(Math.abs(ball.vx) > Math.abs(ball.vy)) ball.vy = 0;
+    else ball.vx = 0;
+  } else if(b.type === "type9"){
+    reflectNormal(ball,r);
+    ball.vx *= 1.08;
+    ball.vy *= 1.08;
+  } else {
+    reflectNormal(ball,r);
+  }
+
+  snapBallOut(ball,r);
+  addSparks(ball.x,ball.y,b.type==="type9"?"#c34cff":"#ffc21b",5);
+}
+
+function update(dt){
+  game.time += dt;
+
+  for(const ball of game.balls){
+    if(performance.now() - ball.born > 7000){
+      respawnBall(ball);
+    }
+
+    ball.x += ball.vx * dt * game.speed;
+    ball.y += ball.vy * dt * game.speed;
+
+    // Wände: exakt gerade Bahn, keine zufälligen Winkel.
+    if(ball.x-ball.r < grid.x){
+      ball.x = grid.x + ball.r;
+      ball.vx = Math.abs(ball.vx || 175*S);
+    }
+    if(ball.x+ball.r > grid.x+grid.size){
+      ball.x = grid.x+grid.size-ball.r;
+      ball.vx = -Math.abs(ball.vx || 175*S);
+    }
+    if(ball.y-ball.r < grid.y){
+      ball.y = grid.y+ball.r;
+      ball.vy = Math.abs(ball.vy || 175*S);
+    }
+    if(ball.y+ball.r > grid.y+grid.size){
+      ball.y = grid.y+grid.size-ball.r;
+      ball.vy = -Math.abs(ball.vy || 175*S);
+    }
+
+    for(const b of game.blocks){
+      if(b === game.dragging) continue;
+      const r = blockScreenRect(b);
+      if(circleRect(ball,r)) handleBallBlock(ball,b);
+    }
+  }
+
+  for(let i=game.texts.length-1;i>=0;i--){
+    const t = game.texts[i];
+    t.life -= dt;
+    t.y += t.vy * dt;
+    if(t.life <= 0) game.texts.splice(i,1);
+  }
+  for(let i=game.coinParticles.length-1;i>=0;i--){
+    const c = game.coinParticles[i];
+    c.life -= dt;
+    c.vy += 240*S*dt;
+    c.x += c.vx*dt;
+    c.y += c.vy*dt;
+    if(c.life <= 0) game.coinParticles.splice(i,1);
+  }
+  for(let i=game.sparks.length-1;i>=0;i--){
+    const s = game.sparks[i];
+    s.life -= dt;
+    s.x += s.vx*dt;
+    s.y += s.vy*dt;
+    if(s.life <= 0) game.sparks.splice(i,1);
+  }
+}
+
+function drawBoard(){
+  const pipe = 25*S;
+
+  rect(grid.x-pipe, grid.y-pipe, grid.size+pipe*2, grid.size+pipe*2, "#9fbfc8", "#2a2632", 6*S);
+
+  ctx.fillStyle = "rgba(255,255,255,.18)";
+  ctx.fillRect(grid.x-pipe+8*S, grid.y-pipe+7*S, grid.size+pipe*2-16*S, 8*S);
+  ctx.fillRect(grid.x-pipe+8*S, grid.y+grid.size+pipe-15*S, grid.size+pipe*2-16*S, 8*S);
+
+  ctx.fillStyle = "#bddada";
+  ctx.fillRect(grid.x, grid.y, grid.size, grid.size);
+
+  ctx.strokeStyle = "#362e43";
+  ctx.lineWidth = 4*S;
+  for(let i=0;i<=grid.cols;i++){
+    ctx.beginPath();
+    ctx.moveTo(grid.x+i*grid.cell, grid.y);
+    ctx.lineTo(grid.x+i*grid.cell, grid.y+grid.size);
+    ctx.stroke();
+  }
+  for(let r=0;r<=grid.rows;r++){
+    ctx.beginPath();
+    ctx.moveTo(grid.x, grid.y+r*grid.cell);
+    ctx.lineTo(grid.x+grid.size, grid.y+r*grid.cell);
+    ctx.stroke();
+  }
+
+  // Pipe oben und linker Auslass wie im Screenshot-Gefühl
+  ctx.fillStyle = "#756e7e";
+  ctx.fillRect(grid.x + grid.size/2 - 18*S, grid.y-pipe-72*S, 36*S, 72*S);
+  ctx.fillStyle = "#6ba85b";
+  ctx.beginPath();
+  ctx.ellipse(grid.x-pipe-4*S, grid.y+grid.size*0.50, 7*S, 20*S, 0, 0, Math.PI*2);
+  ctx.fill();
+}
+
+function drawTriangleBlock(b,r){
+  ctx.save();
+
+  ctx.translate(r.x+r.w/2, r.y+r.h/2);
+  ctx.rotate(b.rot * Math.PI/2);
+  ctx.translate(-r.w/2, -r.h/2);
+
+  ctx.fillStyle = "#d83f55";
+  ctx.beginPath();
+  ctx.moveTo(0,0);
+  ctx.lineTo(r.w,0);
+  ctx.lineTo(r.w,r.h);
+  ctx.closePath();
+  ctx.fill();
+  ctx.lineWidth = 3*S;
+  ctx.strokeStyle = "#18141d";
+  ctx.stroke();
+
+  ctx.strokeStyle = "#fff";
+  ctx.lineWidth = 5*S;
+  ctx.beginPath();
+  ctx.moveTo(r.w*0.66, r.h*0.36);
+  ctx.lineTo(r.w*0.78, r.h*0.24);
+  ctx.stroke();
+
+  ctx.restore();
+}
+
+function drawBlock(b){
+  const r = blockScreenRect(b);
+
+  if(b.type === "tri"){
+    drawTriangleBlock(b,r);
+    return;
+  }
+
+  let fill = "#079b2d";
+  let peg = "#00823a";
+  if(b.type === "type8"){ fill="#c73565"; peg="#e24c76"; }
+  if(b.type === "type9"){ fill="#8738c9"; peg="#b04cff"; }
+
+  rect(r.x,r.y,r.w,r.h,fill,"#18141d",3*S);
+  pixelText(String(b.level), r.x+r.w/2, r.y+r.h/2, 24, "#fff");
+
+  ctx.fillStyle = peg;
+  ctx.beginPath();
+  ctx.ellipse(r.x+r.w/2, r.y+r.h+14*S, 10*S, 29*S, 0, 0, Math.PI*2);
+  ctx.fill();
+  ctx.lineWidth = 3*S;
+  ctx.strokeStyle = "#18141d";
+  ctx.stroke();
+
+  if(b.type === "type8"){
+    ctx.beginPath();
+    ctx.ellipse(r.x+r.w/2, r.y-12*S, 10*S, 28*S, 0, 0, Math.PI*2);
+    ctx.fill();
+    ctx.stroke();
+  }
+  if(b.type === "type9"){
+    ctx.beginPath();
+    ctx.ellipse(r.x+r.w+13*S, r.y+r.h/2, 28*S, 9*S, 0, 0, Math.PI*2);
+    ctx.fill();
+    ctx.stroke();
+  }
+}
+
+function drawBall(ball){
+  ctx.save();
+  ctx.translate(ball.x,ball.y);
+  ctx.rotate(game.time*6);
+  const colors = ["#f7f7f7","#f36d4a","#39bfe6","#f08c25"];
+  ctx.fillStyle = colors[ball.skin] || "#f7f7f7";
+  ctx.beginPath();
+  ctx.arc(0,0,ball.r,0,Math.PI*2);
+  ctx.fill();
+  ctx.lineWidth = 3*S;
+  ctx.strokeStyle = "#111";
+  ctx.stroke();
+
+  ctx.strokeStyle = "rgba(120,0,0,.55)";
+  ctx.lineWidth = 2*S;
+  ctx.beginPath();
+  ctx.moveTo(-ball.r,0);
+  ctx.lineTo(ball.r,0);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawBuyButton(title,line,cost,x,y,w,h,green,fn){
+  rect(x,y,w,h,green ? "#078d22" : "#3f3e40", "#050505", 5*S);
+  pixelText(title,x+w/2,y+25*S,28,"#eeeeee");
+  pixelText(line,x+w/2,y+58*S,26,line.includes(">") ? "#2cff42" : "#fff");
+  pixelText("Buy",x+48*S,y+85*S,27,"#fff","left");
+  drawCoin(x+140*S,y+85*S,13*S);
+  pixelText(fmt(cost),x+176*S,y+85*S,26,game.coins>=cost ? "#ffc21b" : "#ef3b3b","left");
+  game.zones.push({x,y,w,h,fn});
+}
+
+function drawTrashIcon(x,y,w,h){
+  rect(x,y,w,h,"#8e8e8e","#050505",5*S);
+  ctx.strokeStyle = "#5c5c5c";
+  ctx.lineWidth = 3*S;
+  ctx.beginPath();
+  ctx.moveTo(x+w*.35,y+h*.30);
+  ctx.lineTo(x+w*.65,y+h*.30);
+  ctx.stroke();
+  ctx.strokeRect(x+w*.35,y+h*.35,w*.30,h*.40);
+  ctx.beginPath();
+  ctx.moveTo(x+w*.43,y+h*.42); ctx.lineTo(x+w*.43,y+h*.70);
+  ctx.moveTo(x+w*.57,y+h*.42); ctx.lineTo(x+w*.57,y+h*.70);
+  ctx.stroke();
+}
+
+function drawUI(){
+  game.zones.length = 0;
+
+  const coinX = shop.x + 230*S;
+  const coinY = grid.y + 20*S;
+
+  drawCoin(coinX,coinY,16*S);
+  pixelText(fmt(game.coins),coinX+40*S,coinY,42,"#ffc21b","left");
+
+  rect(coinX+245*S,coinY-30*S,82*S,82*S,"#078520","#050505",5*S);
+  ctx.strokeStyle="#ddd";
+  ctx.lineWidth=4*S;
+  ctx.beginPath();
+  ctx.arc(coinX+286*S,coinY+11*S,13*S,0,Math.PI*2);
+  ctx.stroke();
+  for(let i=0;i<8;i++){
+    const a=i*Math.PI/4;
+    ctx.beginPath();
+    ctx.moveTo(coinX+286*S+Math.cos(a)*17*S,coinY+11*S+Math.sin(a)*17*S);
+    ctx.lineTo(coinX+286*S+Math.cos(a)*23*S,coinY+11*S+Math.sin(a)*23*S);
+    ctx.stroke();
+  }
+  game.zones.push({x:coinX+245*S,y:coinY-30*S,w:82*S,h:82*S,fn:()=>game.settingsOpen=true});
+
+  rect(shop.x-22*S,coinY-30*S,125*S,70*S,"#0796b7","#050505",5*S);
+  pixelText("x2",shop.x+40*S,coinY-8*S,24,"#fff");
+  pixelText("Bonus",shop.x+40*S,coinY+22*S,24,"#fff");
+  game.zones.push({x:shop.x-22*S,y:coinY-30*S,w:125*S,h:70*S,fn:()=>game.bonusOpen=true});
+
+  const x=shop.x,y=shop.y,w=shop.bw,h=shop.bh,g=shop.gap;
+
+  drawBuyButton("New Block","+1",game.blockCost,x,y,w,h,true,buyBlock);
+  drawBuyButton("New Ball",`${game.balls.length} > ${game.balls.length+1}`,game.ballCost,x+w+g,y,w,h,false,buyBall);
+  drawBuyButton("Ball Income",`x${game.income.toFixed(1)} > x${(game.income+0.1).toFixed(1)}`,game.incomeCost,x,y+h+g,w,h,false,()=>upgrade("income"));
+  drawBuyButton("Ball Speed",`${Math.round(game.speed*100)}% > ${Math.round((game.speed+0.02)*100)}%`,game.speedCost,x+w+g,y+h+g,w,h,false,()=>upgrade("speed"));
+  drawBuyButton("Chance Crit",`${game.crit.toFixed(1)}% > ${(game.crit+2.4).toFixed(1)}%`,game.critCost,x,y+2*(h+g),w,h,true,()=>upgrade("crit"));
+  drawBuyButton("Triple Income",`${game.triple.toFixed(1)}% > ${(game.triple+0.8).toFixed(1)}%`,game.tripleCost,x+w+g,y+2*(h+g),w,h,true,()=>upgrade("triple"));
+
+  const tx=x+10*S, ty=y+3*(h+g)+175*S;
+  drawTrashIcon(tx,ty,88*S,88*S);
+  game.zones.push({x:tx,y:ty,w:88*S,h:88*S,fn:()=>{game.selectedTool = game.selectedTool==="trash"?"move":"trash"; game.placing=null;}});
+  if(game.selectedTool==="trash"){
+    ctx.strokeStyle="#ff3333";
+    ctx.lineWidth=5*S;
+    ctx.strokeRect(tx-6*S,ty-6*S,100*S,100*S);
+  }
+
+  rect(x+w+g,y+3*(h+g)+160*S,w,84*S,"#4a5556","#050505",5*S);
+  pixelText("Next Map",x+w+g+w/2,y+3*(h+g)+191*S,33,"#eee");
+  drawCoin(x+w+g+82*S,y+3*(h+g)+224*S,14*S);
+  pixelText("1.0M",x+w+g+115*S,y+3*(h+g)+224*S,29,"#ef3d3d","left");
+
+  if(game.placing){
+    const gx = grid.x + grid.size/2;
+    pixelText("Feld antippen zum Platzieren", gx, grid.y-45*S, 22, "#39ff4c");
+    drawGhostBlock();
+  }
+}
+
+function drawGhostBlock(){
+  const x = grid.x + grid.size - grid.cell*1.25;
+  const y = grid.y - grid.cell*0.95;
+  const ghost = {c:0,r:0,type:game.placing.type,level:1,rot:game.placing.rot,dragX:x,dragY:y};
+  ctx.globalAlpha = 0.7;
+  if(ghost.type==="tri"){
+    drawTriangleBlock(ghost,{x:x+2*S,y:y+2*S,w:grid.cell-4*S,h:grid.cell-4*S});
+  } else {
+    const oldDrag=game.dragging;
+    game.dragging=ghost;
+    drawBlock(ghost);
+    game.dragging=oldDrag;
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawEffects(){
+  for(const s of game.sparks){
+    ctx.globalAlpha = clamp(s.life*4,0,1);
+    ctx.fillStyle = s.color;
+    ctx.fillRect(s.x-2*S,s.y-2*S,4*S,4*S);
+  }
+  ctx.globalAlpha = 1;
+
+  for(const c of game.coinParticles){
+    ctx.globalAlpha = clamp(c.life*1.5,0,1);
+    drawCoin(c.x,c.y,9*S);
+  }
+  ctx.globalAlpha = 1;
+
+  for(const t of game.texts){
+    ctx.globalAlpha = clamp(t.life,0,1);
+    pixelText(t.text,t.x,t.y,t.size,t.color);
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawBonusPopup(){
+  ctx.fillStyle = "rgba(0,0,0,.62)";
+  ctx.fillRect(0,0,W,H);
+
+  pixelText("BONUS",W/2,H/2-165*S,58,"#fff");
+  rect(W/2-210*S,H/2-100*S,420*S,210*S,"#986833","#050505",5*S);
+  pixelText("After watching a",W/2,H/2-45*S,25,"#fff");
+  pixelText("short promotional",W/2,H/2-10*S,25,"#fff");
+  pixelText("video, you receive",W/2,H/2+25*S,25,"#fff");
+  drawCoin(W/2-40*S,H/2+65*S,15*S);
+  pixelText(fmt(Math.max(50,Math.round((game.coins+25)*4))),W/2+5*S,H/2+65*S,31,"#ffc21b","left");
+
+  rect(W/2-190*S,H/2+130*S,180*S,84*S,"#078a18","#050505",5*S);
+  pixelText("YES",W/2-100*S,H/2+172*S,42,"#042900");
+  rect(W/2+20*S,H/2+130*S,180*S,84*S,"#b52b08","#050505",5*S);
+  pixelText("NO",W/2+110*S,H/2+172*S,42,"#2b0800");
+}
+
+function drawSettings(){
+  ctx.fillStyle = "rgba(0,0,0,.58)";
+  ctx.fillRect(0,0,W,H);
+  rect(W/2-255*S,H/2-220*S,510*S,440*S,"#976934","#050505",5*S);
+  pixelText("Setting",W/2,H/2-165*S,48,"#fff");
+
+  pixelText("Text coin",W/2,H/2-40*S,34,"#fff");
+  rect(W/2-165*S,H/2+40*S,70*S,70*S,game.textCoins?"#119432":"#575757","#050505",5*S);
+  if(game.textCoins) pixelText("✓",W/2-130*S,H/2+75*S,42,"#0f5");
+
+  pixelText("Tap triangle = rotate",W/2,H/2+5*S,23,"#fff");
+  pixelText("Drag block = move",W/2,H/2+110*S,23,"#fff");
+
+  rect(W/2-60*S,H/2+135*S,120*S,84*S,"#cf342d","#050505",5*S);
+  pixelText("X",W/2,H/2+177*S,58,"#fff");
+}
+
+function draw(){
+  ctx.fillStyle = "#3b3048";
+  ctx.fillRect(0,0,W,H);
+
+  drawBoard();
+
+  for(const b of game.blocks) drawBlock(b);
+  for(const ball of game.balls) drawBall(ball);
+
+  drawEffects();
+  drawUI();
+
+  if(game.bonusOpen) drawBonusPopup();
+  if(game.settingsOpen) drawSettings();
+}
+
+let last = performance.now();
+function loop(now){
+  const dt = Math.min(0.033, (now-last)/1000);
+  last = now;
+  update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+
+resize();
+requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
